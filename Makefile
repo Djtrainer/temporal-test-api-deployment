@@ -32,6 +32,16 @@ compose-down:
 compose-logs:
 	docker compose logs -f --tail=100
 
+# Run api + worker against the deployed GCP Temporal Server (uses .env)
+compose-gcp-up:
+	docker compose -f docker-compose.gcp.yml up --build
+
+compose-gcp-down:
+	docker compose -f docker-compose.gcp.yml down
+
+compose-gcp-logs:
+	docker compose -f docker-compose.gcp.yml logs -f --tail=100
+
 # Build the image used for Cloud Run (also used by docker-compose)
 docker-build:
 	docker build -f docker/Dockerfile -t temporal-test-api:latest .

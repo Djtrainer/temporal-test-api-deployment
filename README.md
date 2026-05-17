@@ -1,18 +1,33 @@
 # temporal-test-api-deployment
 
-Dummy FastAPI app that triggers a Temporal workflow. Designed to run:
+Template for a FastAPI service that runs a Temporal worker **in the same
+container**. Built for the pattern where developers clone, add workflows,
+and ship a single Cloud Run service against a centrally-deployed Temporal
+Server.
 
-1. **Locally** against a Temporal dev server (`temporal server start-dev`)
-2. **Locally via Docker Compose** (single command, no Python tooling required)
-3. **On Cloud Run** against the deployed Temporal Server from
-   [`temporal-test-deployment`](../temporal-test-deployment/)
+## Single-container architecture
 
-## What it does
+```
+┌─────────────────────────────────────┐         ┌─────────────────────┐
+│  uvicorn  (one process)             │  gRPC   │  Temporal Server    │
+│  ┌────────────┐  ┌───────────────┐  │ ──TLS──►│  (Cloud Run / Cloud)│
+│  │ FastAPI    │  │ Worker        │  │         └─────────────────────┘
+│  │ endpoints  │  │ (lifespan)    │  │
+│  └────────────┘  └───────────────┘  │
+└─────────────────────────────────────┘
+```
+
+FastAPI's [lifespan](https://fastapi.tiangolo.com/advanced/events/) hook starts
+the Temporal Worker as a background task on the same asyncio event loop, and
+shares one `Client` with the request handlers. One image, one container,
+one deploy.
+
+## Endpoints
 
 - `POST /hello` — starts `HelloWorkflow`, blocks until result, returns it
-- `POST /hello/async` — starts the workflow and returns the workflow ID immediately
-- `GET /workflow/{id}` — returns workflow status / run id / timestamps
-- `GET /health` — sanity check that also echoes back the Temporal connection settings
+- `POST /hello/async` — starts and returns the workflow ID immediately
+- `GET /workflow/{id}` — workflow status, run id, timestamps
+- `GET /health` — echoes back the Temporal connection settings
 
 `HelloWorkflow` runs two `say_hello` activities with a 2-second `workflow.sleep`
 between them — enough events to see a real history in the Temporal UI.
@@ -21,117 +36,120 @@ between them — enough events to see a real history in the Temporal UI.
 
 ```
 app/
-  activities.py    say_hello activity
-  workflows.py     HelloWorkflow
-  api.py           FastAPI entrypoint
-  worker.py        Temporal worker entrypoint
-  client.py        shared Client.connect factory
-  config.py        env-driven settings (pydantic-settings)
-docker/Dockerfile  shared image used by api + worker (and Cloud Run)
-docker-compose.yml temporal-dev + api + worker
+  activities.py    say_hello — example activity
+  workflows.py     HelloWorkflow — example workflow
+  api.py           FastAPI + in-process Worker (lifespan hook)
+  worker.py        (optional) standalone worker entrypoint for scale-out
+  client.py        Client.connect factory
+  config.py        env-driven settings
+docker/Dockerfile  single image used locally and on Cloud Run
+docker-compose.yml      local: temporal-dev + api (with embedded worker)
+docker-compose.gcp.yml  local: api pointed at deployed GCP Temporal
+.env.example      env var reference
+.env              (gitignored) your local config
 ```
 
-The **API and worker are separate processes**. They share workflow/activity code
-but have independent lifecycles — the worker keeps polling task queues even when
-the API restarts.
+## Add a workflow (the template flow)
 
-## Running locally (Python, three terminals)
+1. Define an activity in `app/activities.py`
+2. Define a workflow in `app/workflows.py` that calls the activity
+3. Register both in `app/api.py`'s lifespan (`Worker(workflows=[...], activities=[...])`)
+4. Add an endpoint that calls `client.start_workflow(...)`
 
-Prereqs: `brew install uv temporal` (or equivalent installers).
+That's it. Local dev and Cloud Run deploy don't need any other changes.
 
-```sh
-# Terminal 1 — Temporal dev server (in-memory, UI at http://localhost:8233)
-temporal server start-dev
+## Run locally (Docker Compose, no Python tooling needed)
 
-# Terminal 2 — worker
-make worker            # or:  uv run python -m app.worker
-
-# Terminal 3 — API
-make api               # or:  uv run uvicorn app.api:app --reload
-```
-
-Then hit it:
-
-```sh
-curl -X POST http://localhost:8000/hello -H 'Content-Type: application/json' -d '{"name":"world"}'
-```
-
-You should get back something like `{"workflow_id":"hello-...","result":"Hello, world! ... | Hello, dlrow! ..."}`,
-and the workflow will appear in the Temporal UI at http://localhost:8233.
-
-## Running locally (Docker Compose)
-
-No Python tooling needed. One command brings up Temporal, the API, and the worker:
+**Against a local Temporal dev server** (auto-spun-up):
 
 ```sh
 docker compose up --build
+# UI at http://localhost:8233, API at http://localhost:8000
 ```
 
-Same curl command as above. Temporal UI at http://localhost:8233.
-
-## Connecting to the deployed GCP Temporal Server
-
-After `temporal-test-deployment` has been applied and the server URL is known
-(e.g. `https://temporal-server-x6zanzgmrq-uc.a.run.app`), point this app at it
-by setting three env vars:
+**Against the deployed GCP Temporal Server** (uses `.env`):
 
 ```sh
-export TEMPORAL_HOST=temporal-server-x6zanzgmrq-uc.a.run.app:443
-export TEMPORAL_TLS=true
-export TEMPORAL_NAMESPACE=default
-
-# Then run the worker + api as usual:
-make worker  &
-make api
+cp .env.example .env   # then edit TEMPORAL_HOST + TEMPORAL_TLS=true
+docker compose -f docker-compose.gcp.yml up --build
 ```
 
-The same code runs against local-dev Temporal and Cloud-Run-hosted Temporal —
-only the env vars change.
-
-## Deploying the API + worker to Cloud Run
-
-After the server is deployed in the sibling repo, push this image to Artifact
-Registry and create two Cloud Run services pointing at it.
+Smoke test either:
 
 ```sh
-PROJECT_ID=stunning-vertex-437612-f6
+curl -X POST http://localhost:8000/hello \
+  -H 'Content-Type: application/json' -d '{"name":"world"}'
+```
+
+## Run locally (native Python, faster iteration)
+
+```sh
+# one-time
+uv sync   # or:  python -m venv .venv && pip install -e .
+
+# foreground
+uv run uvicorn app.api:app --reload --host 0.0.0.0 --port 8000
+```
+
+Set `TEMPORAL_HOST` etc. via `.env` or env vars. With `--reload`, the worker
+restarts when you edit a workflow/activity — fast feedback loop.
+
+## Deploy to Cloud Run
+
+Single service, single image. Two flags are non-negotiable for the
+embedded-worker pattern:
+
+| Flag | Why |
+|---|---|
+| `--min-instances=1` | Worker must keep polling task queues between requests |
+| `--no-cpu-throttling` | Cloud Run pauses CPU on idle by default; that stalls the worker |
+
+```sh
+PROJECT=stunning-vertex-437612-f6
 REGION=us-central1
 REPO=temporal
-IMAGE=$REGION-docker.pkg.dev/$PROJECT_ID/$REPO/temporal-test-api:latest
-TEMPORAL_HOST=temporal-server-x6zanzgmrq-uc.a.run.app:443   # from the other repo's outputs
+IMAGE=$REGION-docker.pkg.dev/$PROJECT/$REPO/temporal-test-api:latest
+TEMPORAL_HOST=temporal-server-x6zanzgmrq-uc.a.run.app:443   # from temporal-test-deployment outputs
+TASK_QUEUE=demo-task-queue                                  # per-tenant: name it whatever
 
-# 1. Build & push
-gcloud builds submit --tag=$IMAGE
+# 1. Build and push
+gcloud builds submit --tag=$IMAGE --project=$PROJECT
 
-# 2. API — public, scales to zero
+# 2. Deploy
 gcloud run deploy temporal-test-api \
-  --image=$IMAGE --region=$REGION --project=$PROJECT_ID \
-  --command=uvicorn --args=app.api:app,--host,0.0.0.0,--port,8080 \
-  --port=8080 --allow-unauthenticated \
-  --set-env-vars=TEMPORAL_HOST=$TEMPORAL_HOST,TEMPORAL_TLS=true,TEMPORAL_NAMESPACE=default,TEMPORAL_TASK_QUEUE=demo-task-queue
-
-# 3. Worker — needs min-instances=1 to keep polling task queues
-gcloud run deploy temporal-test-worker \
-  --image=$IMAGE --region=$REGION --project=$PROJECT_ID \
-  --command=python --args=-m,app.worker \
-  --min-instances=1 --max-instances=1 \
+  --image=$IMAGE --region=$REGION --project=$PROJECT \
+  --port=8000 --allow-unauthenticated \
+  --min-instances=1 --max-instances=3 \
   --no-cpu-throttling \
-  --set-env-vars=TEMPORAL_HOST=$TEMPORAL_HOST,TEMPORAL_TLS=true,TEMPORAL_NAMESPACE=default,TEMPORAL_TASK_QUEUE=demo-task-queue
+  --set-env-vars=TEMPORAL_HOST=$TEMPORAL_HOST,TEMPORAL_TLS=true,TEMPORAL_NAMESPACE=default,TEMPORAL_TASK_QUEUE=$TASK_QUEUE
 ```
 
-Notes on the worker on Cloud Run:
-- `--min-instances=1` and `--no-cpu-throttling` are non-negotiable — the worker
-  must stay alive *between* requests to poll the task queue. With CPU throttling
-  it gets paused and starts dropping heartbeats.
-- There's no ingress port for the worker; the `--port` flag is ignored.
-- For real workloads the worker belongs on GKE/Compute Engine, not Cloud Run.
-  Cloud Run is fine for this dummy app.
+Each developer's app should pick a **distinct task queue** (`TEMPORAL_TASK_QUEUE`)
+so workers don't compete for each other's workflows. The Temporal namespace can
+be shared (`default`) or per-tenant — your call.
 
-## Configuration reference
+## Configuration
 
 | env var | default | notes |
 |---|---|---|
 | `TEMPORAL_HOST` | `localhost:7233` | `host:port` of Temporal frontend |
-| `TEMPORAL_NAMESPACE` | `default` | matches `auto-setup`'s default namespace |
-| `TEMPORAL_TLS` | `false` | set `true` for Cloud Run / Temporal Cloud |
-| `TEMPORAL_TASK_QUEUE` | `demo-task-queue` | must match between API and worker |
+| `TEMPORAL_NAMESPACE` | `default` | matches `auto-setup`'s default |
+| `TEMPORAL_TLS` | `false` | `true` for Cloud-Run-hosted Temporal or Temporal Cloud |
+| `TEMPORAL_TASK_QUEUE` | `demo-task-queue` | per-deployment unique name |
+
+## When to split worker out of the API
+
+The consolidated pattern is the right default for prototypes. Split when you
+hit one of these:
+
+- **Long-running workflows (> minutes)** — API restarts kill in-flight workflow
+  ticks; they'll retry on the next worker poll, but that adds latency you may
+  not want.
+- **CPU-heavy activities** — they compete with FastAPI request handling on the
+  same event loop. A separate worker service can scale on different signals.
+- **Different scaling profiles** — API needs to scale on request rate; worker
+  needs to scale on task queue backlog. Splitting lets each do its own thing.
+
+The standalone worker entrypoint at `app/worker.py` is preserved exactly for
+this — you can deploy a second Cloud Run service running `python -m app.worker`
+against the same image whenever you outgrow the single-container pattern.

@@ -1,0 +1,19 @@
+# Single-container deployment targeting the deployed GCP Temporal Server.
+# Env vars come from .env in the same directory.
+#
+# The api container embeds the Temporal Worker via FastAPI lifespan, so this
+# is the same shape that gets deployed to Cloud Run: one process, one image,
+# one set of env vars.
+#
+# Usage:
+#   docker compose -f docker-compose.gcp.yml up --build
+services:
+  api:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    command: uvicorn app.api:app --host 0.0.0.0 --port 8000
+    env_file: .env
+    ports:
+      - "8000:8000"
+    restart: on-failure

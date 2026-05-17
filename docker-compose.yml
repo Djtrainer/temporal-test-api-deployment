@@ -21,17 +21,3 @@ services:
     depends_on:
       - temporal
     restart: on-failure
-
-  worker:
-    build:
-      context: .
-      dockerfile: docker/Dockerfile
-    command: python -m app.worker
-    environment:
-      TEMPORAL_HOST: temporal:7233
-      TEMPORAL_NAMESPACE: default
-      TEMPORAL_TLS: "false"
-      TEMPORAL_TASK_QUEUE: demo-task-queue
-    depends_on:
-      - temporal
-    restart: on-failure
