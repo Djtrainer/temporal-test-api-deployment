@@ -1,0 +1,37 @@
+services:
+  temporal:
+    image: temporalio/temporal:latest
+    command: server start-dev --ip 0.0.0.0 --ui-port 8233
+    ports:
+      - "7233:7233"  # frontend gRPC
+      - "8233:8233"  # web UI
+
+  api:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    command: uvicorn app.api:app --host 0.0.0.0 --port 8000
+    environment:
+      TEMPORAL_HOST: temporal:7233
+      TEMPORAL_NAMESPACE: default
+      TEMPORAL_TLS: "false"
+      TEMPORAL_TASK_QUEUE: demo-task-queue
+    ports:
+      - "8000:8000"
+    depends_on:
+      - temporal
+    restart: on-failure
+
+  worker:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    command: python -m app.worker
+    environment:
+      TEMPORAL_HOST: temporal:7233
+      TEMPORAL_NAMESPACE: default
+      TEMPORAL_TLS: "false"
+      TEMPORAL_TASK_QUEUE: demo-task-queue
+    depends_on:
+      - temporal
+    restart: on-failure
